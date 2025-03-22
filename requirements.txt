@@ -1,0 +1,1 @@
+gradio\nvosk\nnumpy\npyaudio\ntts\ntorch\nrequests\nsoundfile\nlibrosa\nfaster-whisper\nargostranslate\npsutil
