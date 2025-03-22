@@ -1,3 +1,37 @@
+import sys
+import logging
+
+# Redirect stderr to stdout for logging
+sys.stderr = sys.stdout
+
+# Set up logging to capture all output
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/home/sun/voice-llm-venv/voice_llm.log', mode='a'),
+        logging.StreamHandler(sys.stdout)
+    ],
+    force=True
+)
+
+# Add a handler to capture subprocess stderr
+class StreamToLogger:
+    def __init__(self, logger, level):
+        self.logger = logger
+        self.level = level
+        self.linebuf = ''
+
+    def write(self, buf):
+        for line in buf.rstrip().splitlines():
+            self.logger.log(self.level, line.rstrip())
+
+    def flush(self):
+        pass
+
+# Redirect sys.stderr to logger
+sys.stderr = StreamToLogger(logging.getLogger(), logging.ERROR)
+
 import gradio as gr
 import vosk
 import numpy as np
@@ -20,26 +54,9 @@ from piper import PiperVoice
 import subprocess
 import wave
 import psutil
-import logging
-import sys
 from faster_whisper import WhisperModel  # For Faster Whisper STT
 import argostranslate.package
 import argostranslate.translate  # For offline translation
-
-# Redirect stderr to stdout for logging
-sys.stderr = sys.stdout
-
-# Set up logging to capture all output
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/home/sun/voice-llm-venv/voice_llm.log', mode='a'),
-        logging.StreamHandler(sys.stdout)
-    ],
-    force=True
-)
-logging.info("Logging initialized successfully.")
 
 # Suppress ALSA/JACK warnings
 os.environ["ALSA_LOG_LEVEL"] = "0"
@@ -189,8 +206,8 @@ espeak_voices = ["en-us", "en-uk", "es", "fr", "de", "it", "zh"]
 current_espeak_voice = "en-us"
 
 # OpenUtau setup
-openutau_path = "/home/sun/voice-llm-venv/openutau/OpenUtau"  # Adjust path after installation
-voicebank_path = "/home/sun/voice-llm-venv/openutau/voicebanks/teto"  # Adjust after voicebank setup
+openutau_path = "/home/sun/voice-llm-venv/openutau/OpenUtau"
+voicebank_path = "/home/sun/voice-llm-venv/openutau/voicebanks/teto"
 
 # Offline Translation setup
 translation_languages = ["es", "fr", "de", "it", "zh"]
@@ -301,11 +318,8 @@ def load_faster_whisper_model(model_name):
         faster_whisper_model = None
         torch.cuda.empty_cache()
     logging.info(f"Loading Faster Whisper model: {model_name}")
-    try:
-        faster_whisper_model = WhisperModel(model_name, device=device, compute_type="float16")
-    except torch.cuda.OutOfMemoryError:
-        logging.warning("GPU out of memory. Falling back to CPU.")
-        faster_whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    # Force CPU to avoid cuDNN segfault
+    faster_whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
     current_faster_whisper_model_name = model_name
     mem_usage = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
     logging.info(f"Memory usage after loading Faster Whisper model: {mem_usage:.2f} MB")
@@ -381,18 +395,30 @@ def load_openutau():
 
 def synthesize_openutau(text, output_path):
     logging.info("Starting OpenUtau synthesis...")
-    ust_content = f"""[#0000]
-Length=480
-Lyric={text}
-NoteNum=60
-[#TRACKEND]"""
+    words = text.split()
+    ust_content = ""
+    for i, word in enumerate(words):
+        note_num = 60 + (i % 4) * 2  # Simple melody: C4, D4, E4, F4
+        ust_content += f"[#{i:04d}]\nLength=480\nLyric={word}\nNoteNum={note_num}\n[#NEXT]\n"
+    ust_content += "[#TRACKEND]"
     with tempfile.NamedTemporaryFile(suffix=".ust", delete=False) as ust_file:
         ust_file.write(ust_content.encode())
         ust_file_path = ust_file.name
-    cmd = [openutau_path, "-i", ust_file_path, "-o", output_path, "-v", voicebank_path]
-    subprocess.run(cmd, check=True)
+    cmd = ["xvfb-run", "--auto-servernum", openutau_path, "-i", ust_file_path, "-o", output_path, "-v", voicebank_path]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        logging.info(f"OpenUtau stdout: {result.stdout}")
+        if result.stderr:
+            logging.error(f"OpenUtau stderr: {result.stderr}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"OpenUtau failed: {e}\nstdout: {e.stdout}\nstderr: {e.stderr}")
+        raise
     os.remove(ust_file_path)
     logging.info("OpenUtau synthesis completed.")
+    process = psutil.Process(os.getpid())
+    mem_usage = process.memory_info().rss / 1024 / 1024
+    logging.info(f"Memory usage after TTS synthesis: {mem_usage:.2f} MB")
+    log_gpu_memory()
 
 def set_stop_flag():
     global stop_flag
@@ -625,7 +651,7 @@ def talk_to_llm(audio, amplitude_factor=16.0, ollama_model="smollm2:135m",
         channels=1,
         rate=int(target_rate),
         output=True,
-        output_device_index=output_device_index,
+        output_device_index=16,  # Force to Device 16: pulse
         frames_per_buffer=CHUNK
     )
     for i in range(0, len(audio_data), CHUNK):
@@ -746,3 +772,4 @@ with gr.Blocks() as interface:
 
 if __name__ == "__main__":
     interface.launch(server_name="0.0.0.0", server_port=7860)
+    logging.info("Interface launched on port 7860")
