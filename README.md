@@ -4,7 +4,7 @@ An offline voice-to-voice AI assistant with speech-to-text, text-to-speech, tran
 
 ## Setup
 1. Clone the repository:
-   bash
+   '''bash
    git clone https://github.com/FortezzaJ/VoiceLLM.git
    cd VoiceLLM
 
